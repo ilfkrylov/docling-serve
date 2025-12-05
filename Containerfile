@@ -12,18 +12,83 @@ FROM ${BASE_IMAGE} AS docling-base
 
 USER 0
 
+# Message for readers about below changes: official docling-serve 1.9.0 use old tesseract and it works badly on multilanguage documents. This changes needed for update tesseract and dependency packages.
+
+# Установка базовых утилит и зависимостей
 RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     dnf -y install --best --nodocs --setopt=install_weak_deps=False dnf-plugins-core && \
     dnf config-manager --best --nodocs --setopt=install_weak_deps=False --save && \
     dnf config-manager --enable crb && \
     dnf -y update && \
-    dnf install -y $(cat /tmp/os-packages.txt) && \
+    # Удаляем пакеты tesseract, если они уже установлены в базовом образе
+    (dnf remove -y --nodocs 'tesseract*' 2>/dev/null || true) && \
+    # Установим все пакеты из os-packages.txt, кроме тех, которые начинаются с 'tesseract'
+    # curl не устанавливаем, чтобы избежать конфликта с curl-minimal, который уже есть в образе
+    dnf install -y $(grep -v '^tesseract' /tmp/os-packages.txt) \
+        # Дополнительные зависимости для сборки tesseract
+        autoconf \
+        automake \
+        libtool \
+        pkgconfig \
+        gcc \
+        gcc-c++ \
+        make \
+        cmake \
+        git \
+        wget \
+        which \
+        libarchive \
+        zlib-devel \
+        libjpeg-turbo-devel \
+        libpng-devel \
+        libtiff-devel \
+        libwebp-devel \
+        && \
     dnf -y clean all && \
     rm -rf /var/cache/dnf
 
+# Удаление leptonica чтобы потом установить правильную версию, совместимую с tesseract
+RUN dnf remove -y leptonica leptonica-devel || true
+RUN dnf -y install \
+    autoconf automake libtool pkgconfig \
+    gcc gcc-c++ make \
+    libjpeg-turbo-devel libpng-devel libtiff-devel zlib-devel libwebp-devel \
+    git wget which \
+    && dnf clean all
+
+# Сборка и установка tesseract и leptonica из исходников
+WORKDIR /tmp
+
+RUN wget -q https://github.com/DanBloomberg/leptonica/releases/download/1.85.0/leptonica-1.85.0.tar.gz && \
+    tar -xzf leptonica-1.85.0.tar.gz && \
+    cd leptonica-1.85.0 && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr && \
+    make -j"$(nproc)" && \
+    make install && \
+    ldconfig && \
+    cd /tmp && rm -rf leptonica-1.85.0*
+
+RUN wget -q https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.0.tar.gz && \
+    tar -xzf 5.5.0.tar.gz && \
+    cd tesseract-5.5.0 && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr --disable-openmp && \
+    make -j"$(nproc)" && \
+    make install && \
+    ldconfig && \
+    cd /tmp && rm -rf tesseract-5.5.0 5.5.0.tar.gz
+
+# Установка языковых данных для tesseract (можно поиграться с best и fast, но я выбрал те, которые были на эталонном ПК)
+RUN mkdir -p /usr/share/tessdata && \
+    cd /usr/share/tessdata && \
+    wget -q https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata && \
+    wget -q https://github.com/tesseract-ocr/tessdata_fast/raw/main/rus.traineddata && \
+    wget -q https://github.com/tesseract-ocr/tessdata_best/raw/main/osd.traineddata
+
 RUN /usr/bin/fix-permissions /opt/app-root/src/.cache
 
-ENV TESSDATA_PREFIX=/usr/share/tesseract/tessdata/
+ENV TESSDATA_PREFIX=/usr/share/tessdata/
 
 FROM ${UV_IMAGE} AS uv_stage
 
